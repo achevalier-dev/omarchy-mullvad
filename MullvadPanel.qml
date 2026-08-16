@@ -22,6 +22,9 @@ Panel {
   // ── Settings, read back after every change ─────────────────────────────────
   property var values: ({})
   property string constraint: ""
+  property string device: ""
+  property string expires: ""
+  readonly property bool loggedIn: String(values.loggedin || "") === "yes"
 
   property int cursorIndex: 0
   property bool cursorActive: false
@@ -49,6 +52,7 @@ Panel {
   }
 
   readonly property string stateText: {
+    if (!loggedIn) return "Not logged in"
     if (connected) return "Connected"
     if (tunnel === "connecting") return "Connecting…"
     if (tunnel === "disconnecting") return "Disconnecting…"
@@ -64,12 +68,16 @@ Panel {
 
   // The hero's detail is a pill beside the title, so it has to stay a badge —
   // anything longer squeezes the title out of the row.
-  readonly property string badgeText: connected && code ? code : ""
+  readonly property string badgeText: loggedIn && connected && code ? code : ""
 
   // ── Rows: one list drives both the keyboard cursor and the mouse ───────────
   readonly property var actionKeys: ["reconnect", "location", "status"]
   readonly property var settingKeys: ["lockdown", "autoconnect", "lan", "multihop", "daita", "quantum"]
-  readonly property var rowKeys: ["power"].concat(actionKeys).concat(settingKeys)
+  readonly property var accountKeys: ["devices", "logout"]
+  // Without an account there is exactly one thing worth offering.
+  readonly property var rowKeys: loggedIn
+    ? ["power"].concat(actionKeys).concat(settingKeys).concat(accountKeys)
+    : ["login"]
 
   function labelFor(key) {
     switch (key) {
@@ -83,6 +91,9 @@ Panel {
     case "multihop": return "Multihop"
     case "daita": return "DAITA"
     case "quantum": return "Quantum resistance"
+    case "login": return "Log in…"
+    case "logout": return "Log out…"
+    case "devices": return "Devices on this account"
     }
     return key
   }
@@ -104,6 +115,9 @@ Panel {
     case "multihop": return "mullvad-menu toggle-multihop"
     case "daita": return "mullvad-menu toggle-daita"
     case "quantum": return "mullvad-menu toggle-quantum"
+    case "login": return "mullvad-menu login"
+    case "logout": return "mullvad-menu logout"
+    case "devices": return "mullvad-menu devices"
     }
     return ""
   }
@@ -111,9 +125,9 @@ Panel {
   function activate(key) {
     // The relay pickers are the menu's job — it already draws them, and it is
     // one keystroke away from everything else the menu offers.
-    if (key === "location") {
+    if (key === "location" || key === "login" || key === "logout" || key === "devices") {
       close()
-      if (bar) bar.run("omarchy-menu summon mullvad.location")
+      if (bar) bar.run(key === "location" ? "omarchy-menu summon mullvad.location" : commandFor(key))
       return
     }
 
@@ -203,14 +217,17 @@ Panel {
   Process {
     id: settingsProc
     command: ["bash", "-lc",
-      "printf 'lockdown=%s\\nautoconnect=%s\\nlan=%s\\nmultihop=%s\\ndaita=%s\\nquantum=%s\\nconstraint=%s\\n'"
+      "printf 'lockdown=%s\\nautoconnect=%s\\nlan=%s\\nmultihop=%s\\ndaita=%s\\nquantum=%s\\nconstraint=%s\\nloggedin=%s\\ndevice=%s\\nexpires=%s\\n'"
       + " \"$(mullvad lockdown-mode get | sed 's/.*: //')\""
       + " \"$(mullvad auto-connect get | sed 's/.*: //')\""
       + " \"$(mullvad lan get | sed 's/.*: //')\""
       + " \"$(mullvad relay get | sed -n 's/^[[:space:]]*Multihop state:[[:space:]]*//p')\""
       + " \"$(mullvad tunnel get | sed -n 's/^[[:space:]]*DAITA:[[:space:]]*//p')\""
       + " \"$(mullvad tunnel get | sed -n 's/^[[:space:]]*Quantum resistance:[[:space:]]*//p')\""
-      + " \"$(mullvad relay get | sed -n 's/^[[:space:]]*Location:[[:space:]]*//p')\""]
+      + " \"$(mullvad relay get | sed -n 's/^[[:space:]]*Location:[[:space:]]*//p')\""
+      + " \"$(mullvad account get >/dev/null 2>&1 && echo yes || echo no)\""
+      + " \"$(mullvad account get 2>/dev/null | sed -n 's/^Device name:[[:space:]]*//p')\""
+      + " \"$(mullvad account get 2>/dev/null | sed -n 's/^Expires at:[[:space:]]*//p' | cut -d' ' -f1)\""]
     stdout: SplitParser {
       onRead: function (data) {
         var parts = String(data).split("=")
@@ -219,6 +236,14 @@ Panel {
         var value = parts.join("=").trim()
         if (key === "constraint") {
           root.constraint = value
+          return
+        }
+        if (key === "device") {
+          root.device = value
+          return
+        }
+        if (key === "expires") {
+          root.expires = value
           return
         }
         var next = ({})
@@ -267,7 +292,7 @@ Panel {
     open: root.opened
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(340))
-    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(660))
+    contentHeight: panel.fittedContentHeight(column.implicitHeight, Style.space(860))
 
     PanelKeyCatcher {
       id: keyCatcher
@@ -342,6 +367,7 @@ Panel {
 
               trailingControl: Component {
                 ToggleSwitch {
+                  visible: root.loggedIn
                   checked: header.on
                   busy: header.working
                   hasCursor: header.ringVisible
@@ -356,17 +382,62 @@ Panel {
           Text {
             width: parent.width
             text: root.whereText
-            visible: text !== ""
+            visible: text !== "" && root.loggedIn
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
             elide: Text.ElideRight
           }
 
-          PanelSeparator { foreground: root.foreground }
+          // Logged out: one thing to offer, and a word on what it does.
+          Column {
+            width: parent.width
+            visible: !root.loggedIn
+            spacing: Style.space(8)
+
+            Text {
+              width: parent.width
+              text: "Log in with your Mullvad account number to use the tunnel. The number is typed into a terminal, never onto a command line."
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              wrapMode: Text.WordWrap
+            }
+
+            Rectangle {
+              width: parent.width
+              implicitHeight: Style.space(34)
+              radius: Style.cornerRadius > 0 ? Style.space(8) : 0
+              color: root.hasCursor("login") ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12) : "transparent"
+
+              Text {
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.left: parent.left
+                anchors.leftMargin: Style.space(10)
+                text: root.labelFor("login")
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+
+              MouseArea {
+                anchors.fill: parent
+                hoverEnabled: true
+                cursorShape: Qt.PointingHandCursor
+                onEntered: root.setCursor("login")
+                onClicked: root.activate("login")
+              }
+            }
+          }
+
+          PanelSeparator {
+            foreground: root.foreground
+            visible: root.loggedIn
+          }
 
           Column {
             width: parent.width
+            visible: root.loggedIn
             spacing: Style.space(6)
 
             Repeater {
@@ -400,10 +471,14 @@ Panel {
             }
           }
 
-          PanelSeparator { foreground: root.foreground }
+          PanelSeparator {
+            foreground: root.foreground
+            visible: root.loggedIn
+          }
 
           Column {
             width: parent.width
+            visible: root.loggedIn
             spacing: Style.space(6)
 
             PanelSectionHeader {
@@ -457,10 +532,66 @@ Panel {
             }
           }
 
+          PanelSeparator {
+            foreground: root.foreground
+            visible: root.loggedIn
+          }
+
+          Column {
+            width: parent.width
+            visible: root.loggedIn
+            spacing: Style.space(6)
+
+            PanelSectionHeader {
+              text: "ACCOUNT"
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+            }
+
+            Text {
+              width: parent.width
+              text: (root.device ? root.device : "This device") + (root.expires ? " · paid through " + root.expires : "")
+              color: root.dim
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.caption
+              elide: Text.ElideRight
+            }
+
+            Repeater {
+              model: root.accountKeys
+
+              Rectangle {
+                required property string modelData
+                width: parent.width
+                implicitHeight: Style.space(34)
+                radius: Style.cornerRadius > 0 ? Style.space(8) : 0
+                color: root.hasCursor(modelData) ? Qt.rgba(root.foreground.r, root.foreground.g, root.foreground.b, 0.12) : "transparent"
+
+                Text {
+                  anchors.verticalCenter: parent.verticalCenter
+                  anchors.left: parent.left
+                  anchors.leftMargin: Style.space(10)
+                  text: root.labelFor(parent.modelData)
+                  color: root.foreground
+                  font.family: root.fontFamily
+                  font.pixelSize: Style.font.body
+                }
+
+                MouseArea {
+                  anchors.fill: parent
+                  hoverEnabled: true
+                  cursorShape: Qt.PointingHandCursor
+                  onEntered: root.setCursor(parent.modelData)
+                  onClicked: root.activate(parent.modelData)
+                }
+              }
+            }
+          }
+
           Text {
             width: parent.width
             text: root.constraint ? "Selected relay: " + root.constraint : ""
-            visible: text !== ""
+            visible: text !== "" && root.loggedIn
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -469,7 +600,7 @@ Panel {
 
           Text {
             width: parent.width
-            text: "t connect · r reconnect · l location · s notify · esc close"
+            text: root.loggedIn ? "t connect · r reconnect · l location · s notify · esc close" : "enter log in · esc close"
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption

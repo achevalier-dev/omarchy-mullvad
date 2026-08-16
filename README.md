@@ -17,9 +17,11 @@ and the exit country beside it (`󱇱 FR`).
 
 **In the panel** — the state, the exit relay, and every control: connect,
 reconnect, change location, and a live switch for lockdown mode, auto-connect,
-local network sharing, multihop, DAITA, and quantum resistance. Keyboard: `j`/`k`
-or arrows to move, `enter` to activate, `t` connect, `r` reconnect, `l` location,
-`s` notify, `esc` to close.
+local network sharing, multihop, DAITA, and quantum resistance. An account
+section shows the device name and paid-through date, lists the devices on the
+account, and logs out. With no account logged in, the panel collapses to a
+single **Log in…** row. Keyboard: `j`/`k` or arrows to move, `enter` to
+activate, `t` connect, `r` reconnect, `l` location, `s` notify, `esc` to close.
 
 **In the Omarchy menu** — the same actions, searchable. `Super+Space` then type
 `vpn`, or jump straight there:
@@ -75,7 +77,17 @@ back until they match. A switch only moves once the change actually took.
 mullvad-menu toggle          # connect or disconnect
 mullvad-menu country         # pick a country from a menu
 mullvad-menu toggle-lockdown # flip a setting, confirmed with the daemon
+mullvad-menu login           # account number typed into a terminal
+mullvad-menu account         # device and expiry as a notification
 ```
+
+## Signing in
+
+`Log in…` opens a terminal running `mullvad account login`, which prompts for
+the number on stdin — so your account number never appears in a command line,
+the process list, or shell history. Logging out asks for confirmation first,
+because it revokes the device. Nothing here ever puts the account number in a
+notification or a log.
 
 ## Uninstall
 

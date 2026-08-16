@@ -82,6 +82,20 @@ multihop_value() { mullvad relay get | sed -n 's/^[[:space:]]*Multihop state:[[:
 daita_value() { mullvad tunnel get | sed -n 's/^[[:space:]]*DAITA:[[:space:]]*//p'; }
 quantum_value() { mullvad tunnel get | sed -n 's/^[[:space:]]*Quantum resistance:[[:space:]]*//p'; }
 
+logged_in() { mullvad account get >/dev/null 2>&1; }
+
+# Reads one labelled field out of `mullvad account get`. The account number is
+# in there too — nothing here ever puts it in a notification.
+account_field() { mullvad account get 2>/dev/null | sed -n "s/^$1:[[:space:]]*//p"; }
+
+expiry_days() {
+  local expires seconds
+  expires=$(account_field "Expires at")
+  [[ -n $expires ]] || return 1
+  seconds=$(date -d "$expires" +%s 2>/dev/null) || return 1
+  echo $(((seconds - $(date +%s)) / 86400))
+}
+
 # The selected relay constraint, e.g. "country fr" or "hostname fr-par-wg-301".
 constraint() { mullvad relay get 2>/dev/null | sed -n 's/^[[:space:]]*Location:[[:space:]]*//p'; }
 
@@ -247,6 +261,41 @@ custom-list)
   notify "$(summary)"
   ;;
 
+account)
+  logged_in || fail "Not logged in to Mullvad"
+  days=$(expiry_days || echo "")
+  notify "Device: $(account_field "Device name")"$'\n'"Paid through $(account_field "Expires at" | cut -d' ' -f1)${days:+ · $days days left}"
+  ;;
+
+login)
+  if logged_in; then
+    notify "Already logged in as $(account_field "Device name")"
+    exit 0
+  fi
+  # The CLI prompts for the number on stdin, so it never lands in argv, the
+  # process list, or shell history.
+  omarchy-launch-floating-terminal-with-presentation 'mullvad account login'
+  ;;
+
+logout)
+  logged_in || fail "Not logged in to Mullvad"
+  choice=$(printf '%s\t%s\t%s\n%s\t%s\t%s\n' \
+    "$GLYPH" "Stay logged in" "keep" \
+    "$GLYPH" "Log out and revoke this device" "logout" |
+    omarchy-menu-select "Log out of Mullvad?") || exit 0
+  [[ $(value_of "$choice") == logout ]] || exit 0
+
+  mullvad disconnect >/dev/null 2>&1
+  await disconnected
+  output=$(mullvad account logout 2>&1) || fail "${output:-Could not log out}"
+  notify "Logged out — this device has been revoked"
+  ;;
+
+devices)
+  logged_in || fail "Not logged in to Mullvad"
+  omarchy-launch-floating-terminal-with-presentation 'mullvad account list-devices'
+  ;;
+
 toggle-lockdown)
   [[ $(lockdown_value) == on ]] && next=off || next=on
   mullvad lockdown-mode set "$next" >/dev/null 2>&1 || fail "Could not change lockdown mode"
@@ -295,7 +344,7 @@ toggle-quantum)
   ;;
 
 *)
-  echo "Usage: mullvad-menu <connect|disconnect|reconnect|toggle|status|country|city|server|custom-list|toggle-lockdown|toggle-autoconnect|toggle-lan|toggle-multihop|toggle-daita|toggle-quantum>" >&2
+  echo "Usage: mullvad-menu <connect|disconnect|reconnect|toggle|status|account|login|logout|devices|country|city|server|custom-list|toggle-lockdown|toggle-autoconnect|toggle-lan|toggle-multihop|toggle-daita|toggle-quantum>" >&2
   exit 1
   ;;
 esac

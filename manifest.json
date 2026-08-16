@@ -1,0 +1,34 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.achevalier-dev.mullvad",
+  "name": "Mullvad",
+  "version": "1.0.0",
+  "author": "achevalier-dev",
+  "license": "MIT",
+  "description": "Mullvad VPN state in the Omarchy bar, wired to the Mullvad menu.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "MullvadPanel.qml"
+  },
+  "barWidget": {
+    "displayName": "Mullvad",
+    "description": "Tunnel state in the bar with a panel for connect, reconnect, relay choice, and the privacy settings.",
+    "category": "Network",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "showLocation": true
+    },
+    "schema": [
+      {
+        "key": "showLocation",
+        "type": "boolean",
+        "label": "Show exit country",
+        "description": "Append the relay's country code next to the icon while connected.",
+        "defaultValue": true
+      }
+    ]
+  }
+}

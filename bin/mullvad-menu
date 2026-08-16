@@ -1,0 +1,301 @@
+#!/bin/bash
+# mullvad-menu — Mullvad VPN actions for the Omarchy menu.
+#
+# Wired up from ~/.config/omarchy/extensions/omarchy-menu.jsonc. Menu actions
+# run detached with no terminal attached, so every result comes back as an
+# Omarchy notification and every list is picked with omarchy-menu-select.
+
+set -uo pipefail
+
+GLYPH="󱇱"
+
+notify() { omarchy-notification-send -g "$GLYPH" "Mullvad" "$1"; }
+fail() {
+  notify "$1"
+  exit 1
+}
+
+require_daemon() {
+  command -v mullvad >/dev/null || fail "The mullvad CLI is not installed"
+  systemctl is-active --quiet mullvad-daemon || fail "The Mullvad daemon is not running"
+}
+
+state() { mullvad status -j 2>/dev/null | jq -r '.state // "unknown"'; }
+
+# "Connected · fr-par-wg-301 — France, Paris" from whatever the daemon reports.
+summary() {
+  local status headline relay visible
+  status=$(mullvad status 2>/dev/null) || return 1
+  headline=$(head -n1 <<<"$status")
+  relay=$(sed -n 's/^[[:space:]]*Relay:[[:space:]]*//p' <<<"$status")
+  visible=$(sed -n 's/^[[:space:]]*Visible location:[[:space:]]*//p' <<<"$status" | sed 's/\. IPv4.*//')
+
+  local line="$headline"
+  [[ -n $relay ]] && line+=" · $relay"
+  [[ -n $visible ]] && line+=" — $visible"
+  printf '%s\n' "$line"
+}
+
+# The CLI returns as soon as the daemon accepts the command, so the tunnel is
+# usually still mid-handshake and a setting may not be stored yet. Nothing is
+# reported until the daemon agrees.
+settle() { # $1: state to wait for, or empty for "anything but in-flight"
+  local i want=${1:-} now
+  for ((i = 0; i < 120; i++)); do
+    now=$(state)
+    case "$now" in
+    connecting | disconnecting) ;;
+    *) [[ -z $want || $now == "$want" ]] && return 0 ;;
+    esac
+    sleep 0.25
+  done
+  return 1
+}
+
+# A command that was just issued may not have moved the daemon yet — polling
+# straight away can catch the state it is about to leave. Give the transition a
+# moment to start, then wait for it to finish.
+await() { # $1: state to end in
+  local i
+  for ((i = 0; i < 12; i++)); do
+    case "$(state)" in
+    connecting | disconnecting) break ;;
+    esac
+    sleep 0.25
+  done
+  settle "$1"
+}
+
+confirm() { # $1: getter function, $2: expected value
+  local i
+  for ((i = 0; i < 30; i++)); do
+    [[ $("$1") == "$2" ]] && return 0
+    sleep 0.2
+  done
+  return 1
+}
+
+lockdown_value() { mullvad lockdown-mode get | sed 's/.*: //'; }
+autoconnect_value() { mullvad auto-connect get | sed 's/.*: //'; }
+lan_value() { mullvad lan get | sed 's/.*: //'; }
+multihop_value() { mullvad relay get | sed -n 's/^[[:space:]]*Multihop state:[[:space:]]*//p'; }
+daita_value() { mullvad tunnel get | sed -n 's/^[[:space:]]*DAITA:[[:space:]]*//p'; }
+quantum_value() { mullvad tunnel get | sed -n 's/^[[:space:]]*Quantum resistance:[[:space:]]*//p'; }
+
+# The selected relay constraint, e.g. "country fr" or "hostname fr-par-wg-301".
+constraint() { mullvad relay get 2>/dev/null | sed -n 's/^[[:space:]]*Location:[[:space:]]*//p'; }
+
+# ── Relay list parsing ───────────────────────────────────────────────────────
+# `mullvad relay list` is indentation-structured:
+#   Country (cc)
+#   \tCity (ccc) @ lat, lon
+#   \t\thostname (ip, ip6) - hosted by provider (rented)
+# Each picker emits "<glyph>\t<label>\t<value>" rows for omarchy-menu-select,
+# which hands back "<label>\t<value>".
+
+paren_code() {
+  local value=${1##*\(}
+  printf '%s' "${value%\)}"
+}
+
+list_countries() {
+  local line
+  while IFS= read -r line; do
+    [[ -n $line && $line != $'\t'* ]] || continue
+    printf '%s\t%s\t%s\n' "$GLYPH" "${line%% (*}" "$(paren_code "$line")"
+  done < <(mullvad relay list 2>/dev/null)
+}
+
+list_cities() { # $1: country code
+  local cc=$1 line country="" city
+  while IFS= read -r line; do
+    if [[ -n $line && $line != $'\t'* ]]; then
+      country=$(paren_code "$line")
+      continue
+    fi
+    [[ $country == "$cc" && $line == $'\t'* && $line != $'\t\t'* ]] || continue
+    city=${line#$'\t'}
+    city=${city%% @*}
+    printf '%s\t%s\t%s\n' "$GLYPH" "${city%% (*}" "$(paren_code "$city")"
+  done < <(mullvad relay list 2>/dev/null)
+}
+
+list_servers() { # $1: country code, $2: city code
+  local cc=$1 cy=$2 line country="" city="" server host provider
+  while IFS= read -r line; do
+    if [[ -n $line && $line != $'\t'* ]]; then
+      country=$(paren_code "$line")
+      city=""
+      continue
+    fi
+    if [[ $line == $'\t'* && $line != $'\t\t'* ]]; then
+      server=${line#$'\t'}
+      city=$(paren_code "${server%% @*}")
+      continue
+    fi
+    [[ $country == "$cc" && $city == "$cy" && $line == $'\t\t'* ]] || continue
+    server=${line#$'\t\t'}
+    host=${server%% *}
+    provider=${server#*\) - }
+    printf '%s\t%s\t%s\n' "$GLYPH" "$host" "$provider"
+  done < <(mullvad relay list 2>/dev/null)
+}
+
+pick() { # $1: rows, $2: prompt
+  local rows=$1 prompt=$2
+  [[ -n $rows ]] || fail "No relays to choose from — is the relay list cached yet?"
+  printf '%s\n' "$rows" | omarchy-menu-select "$prompt"
+}
+
+label_of() { printf '%s' "${1%%$'\t'*}"; }
+value_of() { printf '%s' "${1##*$'\t'}"; }
+
+# Applying a constraint while connected makes the daemon rebuild the tunnel on
+# its own; while disconnected it only stores the choice, so connect explicitly.
+apply_location() { # $@: mullvad relay set location arguments
+  local was output
+  was=$(state)
+
+  if ! output=$(mullvad relay set location "$@" 2>&1); then
+    fail "${output:-Could not set that location}"
+  fi
+
+  if [[ $was == connected || $was == connecting ]]; then
+    mullvad reconnect >/dev/null 2>&1
+  else
+    mullvad connect >/dev/null 2>&1
+  fi
+
+  await connected
+  notify "$(summary)"
+}
+
+# ── Actions ──────────────────────────────────────────────────────────────────
+
+cmd=${1:-status}
+shift 2>/dev/null || true
+
+require_daemon
+
+case "$cmd" in
+connect)
+  mullvad connect >/dev/null 2>&1 || fail "Could not connect"
+  await connected
+  notify "$(summary)"
+  ;;
+
+disconnect)
+  mullvad disconnect >/dev/null 2>&1 || fail "Could not disconnect"
+  await disconnected
+  notify "$(summary)"
+  ;;
+
+reconnect)
+  mullvad reconnect >/dev/null 2>&1 || fail "Could not reconnect"
+  await connected
+  notify "$(summary)"
+  ;;
+
+toggle)
+  case "$(state)" in
+  connected | connecting)
+    mullvad disconnect >/dev/null 2>&1
+    await disconnected
+    ;;
+  *)
+    mullvad connect >/dev/null 2>&1
+    await connected
+    ;;
+  esac
+  notify "$(summary)"
+  ;;
+
+status)
+  notify "$(summary)"$'\n'"Selected: $(constraint)"
+  ;;
+
+country)
+  selection=$(pick "$(list_countries)" "VPN country") || exit 0
+  apply_location "$(value_of "$selection")"
+  ;;
+
+city)
+  selection=$(pick "$(list_countries)" "VPN country") || exit 0
+  country=$(value_of "$selection")
+  selection=$(pick "$(list_cities "$country")" "City in $(label_of "$selection")") || exit 0
+  apply_location "$country" "$(value_of "$selection")"
+  ;;
+
+server)
+  selection=$(pick "$(list_countries)" "VPN country") || exit 0
+  country=$(value_of "$selection")
+  selection=$(pick "$(list_cities "$country")" "City in $(label_of "$selection")") || exit 0
+  city=$(value_of "$selection")
+  selection=$(pick "$(list_servers "$country" "$city")" "Server in $(label_of "$selection")") || exit 0
+  apply_location "$(label_of "$selection")"
+  ;;
+
+custom-list)
+  rows=$(mullvad custom-list list 2>/dev/null | while IFS= read -r name; do
+    [[ -n $name ]] && printf '%s\t%s\t%s\n' "$GLYPH" "$name" "$name"
+  done)
+  selection=$(pick "$rows" "Custom list") || exit 0
+  name=$(label_of "$selection")
+  output=$(mullvad relay set custom-list "$name" 2>&1) || fail "${output:-Could not select $name}"
+  if [[ $(state) == connected ]]; then mullvad reconnect >/dev/null 2>&1; else mullvad connect >/dev/null 2>&1; fi
+  await connected
+  notify "$(summary)"
+  ;;
+
+toggle-lockdown)
+  [[ $(lockdown_value) == on ]] && next=off || next=on
+  mullvad lockdown-mode set "$next" >/dev/null 2>&1 || fail "Could not change lockdown mode"
+  confirm lockdown_value "$next" || fail "Lockdown mode did not switch $next"
+  notify "Lockdown mode $next"
+  ;;
+
+toggle-autoconnect)
+  [[ $(autoconnect_value) == on ]] && next=off || next=on
+  mullvad auto-connect set "$next" >/dev/null 2>&1 || fail "Could not change auto-connect"
+  confirm autoconnect_value "$next" || fail "Auto-connect did not switch $next"
+  notify "Auto-connect $next"
+  ;;
+
+toggle-lan)
+  [[ $(lan_value) == allow ]] && next=block || next=allow
+  mullvad lan set "$next" >/dev/null 2>&1 || fail "Could not change LAN sharing"
+  confirm lan_value "$next" || fail "LAN sharing did not switch to $next"
+  notify "Local network sharing set to $next"
+  ;;
+
+toggle-multihop)
+  [[ $(multihop_value) == enabled ]] && next=off || next=on
+  mullvad relay set multihop "$next" >/dev/null 2>&1 || fail "Could not change multihop"
+  [[ $next == on ]] && target=enabled || target=disabled
+  confirm multihop_value "$target" || fail "Multihop did not switch $next"
+  settle
+  notify "Multihop $next"
+  ;;
+
+toggle-daita)
+  [[ $(daita_value) == true ]] && next=off || next=on
+  mullvad tunnel set daita "$next" >/dev/null 2>&1 || fail "Could not change DAITA"
+  [[ $next == on ]] && target=true || target=false
+  confirm daita_value "$target" || fail "DAITA did not switch $next"
+  settle
+  notify "DAITA $next"
+  ;;
+
+toggle-quantum)
+  [[ $(quantum_value) == on ]] && next=off || next=on
+  mullvad tunnel set quantum-resistant "$next" >/dev/null 2>&1 || fail "Could not change quantum resistance"
+  confirm quantum_value "$next" || fail "Quantum resistance did not switch $next"
+  settle
+  notify "Quantum-resistant tunnel $next"
+  ;;
+
+*)
+  echo "Usage: mullvad-menu <connect|disconnect|reconnect|toggle|status|country|city|server|custom-list|toggle-lockdown|toggle-autoconnect|toggle-lan|toggle-multihop|toggle-daita|toggle-quantum>" >&2
+  exit 1
+  ;;
+esac

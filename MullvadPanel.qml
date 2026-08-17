@@ -201,11 +201,19 @@ Panel {
     command: ["mullvad", "status", "-j", "listen"]
     running: true
     stdout: SplitParser {
-      onRead: function (data) { root.applyStatus(data) }
+      onRead: function (data) {
+        relisten.interval = 3000
+        root.applyStatus(data)
+      }
     }
     // A daemon restart takes the listener down with it. Come back for the new
-    // one instead of leaving a stale state on screen.
-    onExited: relisten.start()
+    // one instead of leaving a stale state on screen — but back off, because
+    // without the mullvad CLI this exits instantly and a fixed retry would be
+    // a respawn loop for as long as the shell lives.
+    onExited: {
+      relisten.interval = Math.min(relisten.interval * 2, 60000)
+      relisten.start()
+    }
   }
 
   Timer {

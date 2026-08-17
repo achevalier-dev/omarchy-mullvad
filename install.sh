@@ -17,7 +17,7 @@ ln -sf "$REPO/bin/$SCRIPT" "$BIN_DIR/$SCRIPT"
 echo "linked $BIN_DIR/$SCRIPT -> $REPO/bin/$SCRIPT"
 
 mkdir -p "$(dirname "$MENU")"
-[[ -f $MENU ]] || printf '{\n}\n' >"$MENU"
+[[ -s $MENU ]] || printf '{\n}\n' >"$MENU"
 cp "$MENU" "$MENU.bak.$(date +%s)"
 
 python3 - "$REPO/extensions/mullvad.jsonc" "$MENU" "$NAME" <<'PY'
